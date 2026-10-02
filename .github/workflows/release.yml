@@ -1,0 +1,74 @@
+name: Release
+
+# Two ways to publish a new version:
+#  1. Actions tab -> "Release" -> "Run workflow" and pick patch / minor / major.
+#     The version is bumped, committed, tagged and built automatically.
+#  2. Push a tag yourself, e.g. `npm version patch && git push --follow-tags`.
+#
+# The Windows installer and latest.yml are attached to a GitHub Release.
+# Installed copies of VLT find it when you click "Check for updates".
+
+on:
+  workflow_dispatch:
+    inputs:
+      bump:
+        description: Version bump
+        type: choice
+        options: [patch, minor, major]
+        default: patch
+  push:
+    tags: ['v*']
+
+permissions:
+  contents: write
+
+concurrency:
+  group: release
+  cancel-in-progress: false
+
+jobs:
+  bump:
+    if: github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-latest
+    outputs:
+      tag: ${{ steps.bump.outputs.tag }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - id: bump
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          TAG=$(npm version ${{ inputs.bump }} -m "Release %s")
+          git push origin HEAD:${{ github.ref_name }} --follow-tags
+          echo "tag=$TAG" >> "$GITHUB_OUTPUT"
+
+  build:
+    needs: [bump]
+    if: always() && (needs.bump.result == 'success' || (github.event_name == 'push' && needs.bump.result == 'skipped'))
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.bump.outputs.tag || github.ref }}
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+      - name: Check tag matches package.json version
+        shell: bash
+        run: |
+          TAG="${{ needs.bump.outputs.tag || github.ref_name }}"
+          VERSION="v$(node -p "require('./package.json').version")"
+          if [ "$TAG" != "$VERSION" ]; then
+            echo "::error::Tag $TAG does not match package.json version $VERSION"
+            exit 1
+          fi
+      - run: npm ci
+      - run: npm test
+      - name: Build installer and publish GitHub Release
+        run: npx electron-builder --win --x64 --publish always
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}

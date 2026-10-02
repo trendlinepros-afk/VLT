@@ -1,0 +1,83 @@
+{
+  "name": "vlt",
+  "productName": "VLT",
+  "version": "1.0.0",
+  "description": "VLT - an encrypted personal vault for Windows",
+  "main": "src/main/main.js",
+  "author": "trendlinepros-afk",
+  "license": "UNLICENSED",
+  "private": true,
+  "scripts": {
+    "start": "electron .",
+    "test": "node --test test/*.test.js",
+    "dist": "electron-builder --win --publish never",
+    "release": "electron-builder --win --publish always"
+  },
+  "dependencies": {
+    "electron-updater": "^6.8.9",
+    "hash-wasm": "^4.12.0",
+    "mammoth": "^1.13.0",
+    "qrcode": "^1.5.4"
+  },
+  "devDependencies": {
+    "electron": "^44.5.1",
+    "electron-builder": "^26.15.3"
+  },
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/trendlinepros-afk/VLT.git"
+  },
+  "build": {
+    "appId": "com.trendlinepros.vlt",
+    "productName": "VLT",
+    "copyright": "Copyright © 2026 trendlinepros-afk",
+    "directories": {
+      "output": "dist",
+      "buildResources": "build"
+    },
+    "files": [
+      "src/**/*",
+      "build/icon.png",
+      "package.json"
+    ],
+    "asar": true,
+    "electronFuses": {
+      "runAsNode": false,
+      "enableCookieEncryption": true,
+      "enableNodeOptionsEnvironmentVariable": false,
+      "enableNodeCliInspectArguments": false,
+      "enableEmbeddedAsarIntegrityValidation": true,
+      "onlyLoadAppFromAsar": true,
+      "grantFileProtocolExtraPrivileges": true
+    },
+    "win": {
+      "target": [
+        {
+          "target": "nsis",
+          "arch": [
+            "x64"
+          ]
+        }
+      ],
+      "icon": "build/icon.png"
+    },
+    "nsis": {
+      "oneClick": false,
+      "perMachine": false,
+      "allowToChangeInstallationDirectory": true,
+      "createDesktopShortcut": true,
+      "createStartMenuShortcut": true,
+      "shortcutName": "VLT",
+      "deleteAppDataOnUninstall": false,
+      "artifactName": "VLT-Setup-${version}.${ext}"
+    },
+    "publish": [
+      {
+        "provider": "github",
+        "owner": "trendlinepros-afk",
+        "repo": "VLT",
+        "releaseType": "release"
+      }
+    ]
+  }
+}
