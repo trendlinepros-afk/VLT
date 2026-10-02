@@ -15,7 +15,7 @@ VLT is an encrypted vault for Windows. You can keep notes, photos, videos and do
 
 ## Installing
 
-1. Go to the **Releases** page of this repository and download `VLT-Setup-x.y.z.exe`.
+1. Download the installer: **[VLT-Setup.exe](https://github.com/trendlinepros-afk/VLT/releases/latest/download/VLT-Setup.exe)** (always the latest version).
 2. Run it. Windows SmartScreen may say *"Windows protected your PC"* because the app is not code-signed (see [Code signing](#code-signing-optional)). Click **More info → Run anyway**.
 3. Start VLT, choose a strong master password, and you're in.
 
@@ -45,15 +45,15 @@ Click **Check for updates** (top-right in the vault, on the lock screen, or in S
 >
 > *Alternative:* keep this repo private, create a second **public** repository (e.g. `VLT-releases`), and change `build.publish[0].repo` in `package.json` to point at it. The release workflow then needs a personal access token with `contents: write` on that repo, stored as a secret and used instead of `GITHUB_TOKEN`.
 
-**Easiest way:** open **Actions → Release → Run workflow**, choose `patch` (1.0.0 → 1.0.1), `minor` or `major`, and click **Run**. The workflow:
+**Every push to `main` publishes a new version automatically.** The Release workflow:
 
-1. bumps the version in `package.json`, commits it and creates the tag,
-2. runs the tests on Windows,
-3. builds `VLT-Setup-x.y.z.exe` and publishes a GitHub Release with `latest.yml`.
+1. runs the tests on Windows,
+2. bumps the patch version (1.0.1 → 1.0.2), commits it to `main` and tags it,
+3. builds `VLT-Setup.exe` and publishes a GitHub Release with `latest.yml`.
+
+Changes to Markdown files alone don't trigger a release. For a bigger version jump, use **Actions → Release → Run workflow** and choose `minor` or `major`. Because the workflow commits the version bump back to `main`, run `git pull` before your next push.
 
 Every installed copy of VLT then sees the update when you click **Check for updates**.
-
-**Manual way:** `npm version patch && git push --follow-tags`. Pushing a `v*` tag triggers the same build.
 
 ## Developing
 

@@ -1,9 +1,11 @@
 name: Release
 
-# Two ways to publish a new version:
-#  1. Actions tab -> "Release" -> "Run workflow" and pick patch / minor / major.
-#     The version is bumped, committed, tagged and built automatically.
-#  2. Push a tag yourself, e.g. `npm version patch && git push --follow-tags`.
+# Every push to main publishes a new version automatically (patch bump,
+# e.g. 1.0.1 -> 1.0.2). Pushes that only change docs are skipped.
+#
+# Other ways to publish:
+#  - Actions tab -> "Release" -> "Run workflow" to pick patch / minor / major.
+#  - Push a tag yourself, e.g. `npm version minor && git push --follow-tags`.
 #
 # The Windows installer and latest.yml are attached to a GitHub Release.
 # Installed copies of VLT find it when you click "Check for updates".
@@ -17,7 +19,9 @@ on:
         options: [patch, minor, major]
         default: patch
   push:
+    branches: [main]
     tags: ['v*']
+    paths-ignore: ['**.md', 'LICENSE', '.gitignore']
 
 permissions:
   contents: write
@@ -27,13 +31,28 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
+  test:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+      - run: npm ci
+      - run: npm test
+
   bump:
-    if: github.event_name == 'workflow_dispatch'
+    # Manual releases and pushes to main get a new version number (not tag pushes).
+    needs: [test]
+    if: github.event_name == 'workflow_dispatch' || github.ref == 'refs/heads/main'
     runs-on: ubuntu-latest
     outputs:
       tag: ${{ steps.bump.outputs.tag }}
     steps:
       - uses: actions/checkout@v4
+        with:
+          ref: main
       - uses: actions/setup-node@v4
         with:
           node-version: 22
@@ -41,13 +60,13 @@ jobs:
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          TAG=$(npm version ${{ inputs.bump }} -m "Release %s")
-          git push origin HEAD:${{ github.ref_name }} --follow-tags
+          TAG=$(npm version ${{ inputs.bump || 'patch' }} -m "Release %s")
+          git push origin HEAD:main --follow-tags
           echo "tag=$TAG" >> "$GITHUB_OUTPUT"
 
   build:
-    needs: [bump]
-    if: always() && (needs.bump.result == 'success' || (github.event_name == 'push' && needs.bump.result == 'skipped'))
+    needs: [test, bump]
+    if: always() && needs.test.result == 'success' && (needs.bump.result == 'success' || (startsWith(github.ref, 'refs/tags/v') && needs.bump.result == 'skipped'))
     runs-on: windows-latest
     steps:
       - uses: actions/checkout@v4
@@ -67,7 +86,6 @@ jobs:
             exit 1
           fi
       - run: npm ci
-      - run: npm test
       - name: Build installer and publish GitHub Release
         run: npx electron-builder --win --x64 --publish always
         env:
