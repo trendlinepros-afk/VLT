@@ -15,7 +15,7 @@ async function call(channel, ...args) {
   return r.data;
 }
 
-const EVENTS = new Set(['vault:locked', 'update:status', 'import:progress']);
+const EVENTS = new Set(['vault:locked', 'update:status', 'import:progress', 'bulk:progress']);
 
 contextBridge.exposeInMainWorld('vlt', {
   info: () => call('app:info'),
@@ -33,6 +33,8 @@ contextBridge.exposeInMainWorld('vlt', {
   updateNote: (id, data) => call('note:update', id, data),
   rename: (id, name) => call('item:rename', id, name),
   remove: (id) => call('item:delete', id),
+  removeMany: (ids) => call('items:deleteMany', ids),
+  exportMany: (ids) => call('items:exportMany', ids),
 
   pickFiles: () => call('files:pick'),
   addFiles: (files) => call('files:addPaths', Array.from(files, (f) => webUtils.getPathForFile(f)).filter(Boolean)),

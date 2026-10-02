@@ -472,6 +472,24 @@ class Vault {
     if (item.kind === 'file') await fsp.rm(this._blobPath(id), { force: true });
   }
 
+  // Deletes several items with a single index write. Unknown ids are skipped.
+  async deleteItems(ids) {
+    const removed = await this._mutateIndex((items) => {
+      const out = [];
+      for (const id of new Set(ids)) {
+        if (items[id]) {
+          out.push(items[id]);
+          delete items[id];
+        }
+      }
+      return out;
+    });
+    for (const it of removed) {
+      if (it.kind === 'file') await fsp.rm(this._blobPath(it.id), { force: true });
+    }
+    return removed.length;
+  }
+
   _blobPath(id) {
     if (!/^[0-9a-f]{32}$/.test(id)) throw new VaultError('BAD_ID', 'Invalid id.');
     return path.join(this.p.blobs, `${id}.bin`);

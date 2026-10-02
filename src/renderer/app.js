@@ -14,6 +14,9 @@ const state = {
   settings: null,
   update: null,
   mediaUrls: new Map(),
+  selecting: false,
+  selected: new Set(),
+  lastClicked: null,
   confirmedPlaintext: false,
 };
 
@@ -42,6 +45,8 @@ const ICONS = {
   right: '<polyline points="9 18 15 12 9 6"/>',
   refresh: '<polyline points="23 4 23 10 17 10"/><polyline points="1 20 1 14 7 14"/><path d="M3.51 9a9 9 0 0 1 14.85-3.36L23 10M1 14l4.64 4.36A9 9 0 0 0 20.49 15"/>',
   play: '<polygon points="6 3 20 12 6 21 6 3"/>',
+  check: '<polyline points="20 6 9 17 4 12"/>',
+  checkSquare: '<polyline points="9 11 12 14 22 4"/><path d="M21 12v7a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h11"/>',
 };
 
 function icon(name) {
@@ -476,6 +481,12 @@ function renderMain() {
       { class: 'topbar' },
       h('div', { class: 'search' }, icon('search'), dom.search),
       h('div', { class: 'grow' }),
+      (dom.selectBtn = h(
+        'button',
+        { class: 'btn', title: 'Select several items (or Ctrl+click a card)', onclick: () => setSelecting(!state.selecting) },
+        icon('checkSquare'),
+        'Select',
+      )),
       h('button', { class: 'btn', onclick: newNote }, icon('plus'), 'New note'),
       h('button', { class: 'btn primary', onclick: pickFiles }, icon('upload'), 'Add files'),
       dom.updateBtn,
@@ -556,12 +567,145 @@ function renderGrid() {
     return;
   }
 
-  const grid = h('div', { class: 'grid' });
-  for (const it of items) grid.append(card(it));
-  dom.content.replaceChildren(drop, header, grid);
+  // Selection only ever covers items you can currently see.
+  const visible = new Set(items.map((i) => i.id));
+  for (const id of [...state.selected]) if (!visible.has(id)) state.selected.delete(id);
+
+  dom.cards = new Map();
+  const grid = h('div', { class: `grid${state.selecting ? ' selecting' : ''}` });
+  dom.grid = grid;
+  items.forEach((it, idx) => {
+    const el = card(it, idx);
+    dom.cards.set(it.id, el);
+    grid.append(el);
+  });
+  dom.selectBar = h('div', { class: 'select-bar' });
+  dom.content.replaceChildren(drop, dom.selectBar, header, grid);
+  renderSelection();
 }
 
-function card(it) {
+// ------------------------------------------------------------------ multi-select
+
+function setSelecting(on) {
+  state.selecting = on;
+  if (!on) state.selected.clear();
+  state.lastClicked = null;
+  renderSelection();
+}
+
+function toggleSelect(it, idx, shift) {
+  state.selecting = true;
+  const items = visibleItems();
+  if (shift && state.lastClicked !== null && items[state.lastClicked]) {
+    // Shift+click selects the whole range from the last clicked card.
+    const [a, b] = [Math.min(state.lastClicked, idx), Math.max(state.lastClicked, idx)];
+    for (let i = a; i <= b; i++) state.selected.add(items[i].id);
+  } else if (state.selected.has(it.id)) {
+    state.selected.delete(it.id);
+  } else {
+    state.selected.add(it.id);
+  }
+  state.lastClicked = idx;
+  renderSelection();
+}
+
+function selectAllVisible() {
+  state.selecting = true;
+  for (const it of visibleItems()) state.selected.add(it.id);
+  renderSelection();
+}
+
+// Updates checkmarks and the action bar in place (no grid rebuild, so thumbnails don't reload).
+function renderSelection() {
+  if (!dom.grid || !dom.grid.isConnected) return;
+  dom.grid.classList.toggle('selecting', state.selecting);
+  if (dom.selectBtn) dom.selectBtn.classList.toggle('active', state.selecting);
+  for (const [id, el] of dom.cards) el.classList.toggle('selected', state.selected.has(id));
+
+  if (!state.selecting) {
+    dom.selectBar.replaceChildren();
+    dom.selectBar.classList.remove('show');
+    return;
+  }
+  const n = state.selected.size;
+  const total = visibleItems().length;
+  dom.selectBar.classList.add('show');
+  dom.selectBar.replaceChildren(
+    h('strong', { text: n ? `${n} selected` : 'Select items' }),
+    h('span', { class: 'hint', text: n ? '' : 'Click cards to select them. Shift+click selects a range.' }),
+    h('div', { class: 'grow' }),
+    n < total
+      ? h('button', { class: 'btn ghost', onclick: selectAllVisible }, `Select all (${total})`)
+      : h(
+          'button',
+          {
+            class: 'btn ghost',
+            onclick: () => {
+              state.selected.clear();
+              renderSelection();
+            },
+          },
+          'Select none',
+        ),
+    h('button', { class: 'btn', disabled: !n, onclick: bulkExport }, icon('download'), 'Export'),
+    h('button', { class: 'btn danger', disabled: !n, onclick: bulkDelete }, icon('trash'), 'Delete'),
+    h('button', { class: 'btn ghost', title: 'Done (Esc)', onclick: () => setSelecting(false) }, icon('x')),
+  );
+}
+
+async function bulkDelete() {
+  const ids = [...state.selected];
+  if (!ids.length) return;
+  const ok = await confirmDialog({
+    title: `Delete ${ids.length} item${ids.length === 1 ? '' : 's'}?`,
+    body: 'They will be permanently removed from your vault. This cannot be undone.',
+    confirm: `Delete ${ids.length}`,
+    danger: true,
+  });
+  if (!ok) return;
+  try {
+    const n = await api.removeMany(ids);
+    setSelecting(false);
+    await refreshItems();
+    toast(`Deleted ${n} item${n === 1 ? '' : 's'}.`, 'ok');
+  } catch (err) {
+    toast(err.message, 'error');
+    await refreshItems();
+  }
+}
+
+async function bulkExport() {
+  const ids = [...state.selected];
+  if (!ids.length || !(await ensurePlaintextOk('export'))) return;
+  try {
+    const res = await api.exportMany(ids);
+    if (!res) return;
+    if (res.exported) toast(`Exported ${res.exported} item${res.exported === 1 ? '' : 's'} to ${res.dir}`, 'ok', 6000);
+    for (const f of res.failed) toast(`Could not export ${f.name}: ${f.error}`, 'error', 7000);
+    setSelecting(false);
+  } catch (err) {
+    toast(err.message, 'error');
+  }
+}
+
+let bulkToast = null;
+api.on('bulk:progress', (p) => {
+  if (p.finished) {
+    if (bulkToast) bulkToast.remove();
+    bulkToast = null;
+    return;
+  }
+  if (!bulkToast) {
+    bulkToast = toast('', '', 0);
+    bulkToast.label = h('div');
+    bulkToast.bar = h('div');
+    bulkToast.append(bulkToast.label, h('div', { class: 'progress' }, bulkToast.bar));
+  }
+  bulkToast.label.textContent = `${p.label} (${p.index} of ${p.count})`;
+  bulkToast.bar.style.width = `${Math.round((p.index / p.count) * 100)}%`;
+});
+
+function card(it, idx) {
   const thumb = h('div', { class: 'thumb' });
   if (it.kind === 'note') {
     thumb.classList.add('note');
@@ -582,9 +726,29 @@ function card(it) {
     if (ext(it.name)) thumb.append(h('span', { class: 'badge', text: ext(it.name) }));
   }
   const meta = it.kind === 'note' ? `Note · ${formatDate(it.modified)}` : `${formatSize(it.size)} · ${formatDate(it.created)}`;
+  const box = h(
+    'button',
+    {
+      class: 'select-box',
+      title: 'Select',
+      onclick: (e) => {
+        e.stopPropagation();
+        toggleSelect(it, idx, e.shiftKey);
+      },
+    },
+    icon('check'),
+  );
+  thumb.append(box);
   return h(
     'div',
-    { class: 'card', title: it.name, onclick: () => openViewer(it) },
+    {
+      class: 'card',
+      title: it.name,
+      onclick: (e) => {
+        if (state.selecting || e.ctrlKey || e.shiftKey) toggleSelect(it, idx, e.shiftKey);
+        else openViewer(it);
+      },
+    },
     thumb,
     h('div', { class: 'card-body' }, h('div', { class: 'card-name', text: it.name }), h('div', { class: 'card-meta', text: meta })),
   );
@@ -1220,6 +1384,14 @@ document.addEventListener('keydown', (e) => {
     e.preventDefault();
     lockNow();
   }
+  const typing = /INPUT|TEXTAREA|SELECT/.test(document.activeElement && document.activeElement.tagName);
+  if (!viewerEl && !$modals.childElementCount && !typing) {
+    if (e.ctrlKey && e.key.toLowerCase() === 'a') {
+      e.preventDefault();
+      selectAllVisible();
+    }
+    if (e.key === 'Escape' && state.selecting) setSelecting(false);
+  }
   if (e.ctrlKey && e.key.toLowerCase() === 'n' && !viewerEl) {
     e.preventDefault();
     newNote();
@@ -1232,7 +1404,11 @@ api.on('vault:locked', async ({ reason }) => {
   state.items = [];
   state.mediaUrls.clear();
   state.confirmedPlaintext = false;
+  state.selecting = false;
+  state.selected.clear();
   dom = {};
+  if (bulkToast) bulkToast.remove();
+  bulkToast = null;
   if (progressToast) progressToast.remove();
   progressToast = null;
   renderLock(await api.status(), reason);

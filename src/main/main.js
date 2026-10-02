@@ -269,6 +269,30 @@ async function importPaths(paths) {
   return { added, failed };
 }
 
+// Windows-safe file name (no reserved characters, names or trailing dots/spaces).
+function safeFileName(name) {
+  let n = String(name || 'file').replace(/[<>:"/\\|?*\u0000-\u001f]/g, '_').replace(/[. ]+$/, '');
+  if (/^(con|prn|aux|nul|com\d|lpt\d)(\..*)?$/i.test(n)) n = `_${n}`;
+  return n.slice(0, 200) || 'file';
+}
+
+// Picks "name (2).ext", "name (3).ext"... if the name is taken on disk or earlier in this export.
+async function uniquePath(dir, name, used) {
+  const ext = path.extname(name);
+  const stem = name.slice(0, name.length - ext.length);
+  for (let i = 1; ; i++) {
+    const candidate = i === 1 ? name : `${stem} (${i})${ext}`;
+    const full = path.join(dir, candidate);
+    if (used.has(candidate.toLowerCase())) continue;
+    try {
+      await fsp.access(full);
+    } catch {
+      used.add(candidate.toLowerCase());
+      return full;
+    }
+  }
+}
+
 function registerIpc() {
   ipcMain.on('activity', (event) => {
     if (event.senderFrame && event.senderFrame.url.split('#')[0] === RENDERER_URL) lastActivity = Date.now();
@@ -347,12 +371,46 @@ function registerIpc() {
     shell.showItemInFolder(res.filePath);
     return res.filePath;
   });
+  handle('items:deleteMany', (ids) => {
+    if (!Array.isArray(ids) || ids.length > 100000) throw new Error('Invalid input');
+    return vault.deleteItems(ids.map((id) => str(id, 64)));
+  });
+  handle('items:exportMany', async (ids) => {
+    if (!Array.isArray(ids) || ids.length > 100000) throw new Error('Invalid input');
+    const res = await dialog.showOpenDialog(win, {
+      title: 'Choose a folder for the exported (unencrypted) copies',
+      defaultPath: app.getPath('downloads'),
+      properties: ['openDirectory', 'createDirectory'],
+    });
+    if (res.canceled || !res.filePaths[0]) return null;
+    const dir = res.filePaths[0];
+    const used = new Set();
+    let exported = 0;
+    const failed = [];
+    for (let i = 0; i < ids.length; i++) {
+      let item;
+      try {
+        item = vault.getItem(str(ids[i], 64));
+        const base = item.kind === 'note' ? `${item.title}.txt` : item.name;
+        const file = await uniquePath(dir, safeFileName(base), used);
+        send('bulk:progress', { label: `Exporting ${path.basename(file)}`, index: i + 1, count: ids.length });
+        lastActivity = Date.now();
+        if (item.kind === 'note') await fsp.writeFile(file, vault.getNote(item.id).body, { flag: 'wx' });
+        else await vault.exportFile(item.id, file);
+        exported++;
+      } catch (err) {
+        failed.push({ name: item ? item.name || item.title : ids[i], error: err.message });
+      }
+    }
+    send('bulk:progress', { finished: true });
+    if (exported) shell.openPath(dir);
+    return { dir, exported, failed };
+  });
   handle('item:openExternal', async (id) => {
     const item = vault.getItem(str(id, 64));
     const dir = await fsp.mkdtemp(path.join(os.tmpdir(), TEMP_PREFIX));
     tempDirs.add(dir);
-    const safeName = item.name.replace(/[<>:"/\\|?*]/g, '_') || 'file';
-    const file = path.join(dir, safeName);
+    const file = path.join(dir, safeFileName(item.name));
     await vault.exportFile(id, file);
     const err = await shell.openPath(file);
     if (err) throw new Error(err);

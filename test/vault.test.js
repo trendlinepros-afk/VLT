@@ -229,3 +229,23 @@ test('totp matches RFC 6238 test vector', () => {
   assert.equal(totp.verifyTotp(secret, '287082', 59 * 1000), true);
   assert.equal(totp.verifyTotp(secret, '287083', 59 * 1000), false);
 });
+
+test('deleteItems removes several items and their encrypted files at once', async () => {
+  const { v, dir, root } = await newVault();
+  const ids = [];
+  for (let i = 0; i < 3; i++) {
+    const src = path.join(root, `m${i}.txt`);
+    await fsp.writeFile(src, 'x' + i);
+    ids.push((await v.addFile(src)).id);
+  }
+  const note = await v.createNote({ title: 'keep' });
+  const n = await v.deleteItems([ids[0], ids[2], 'ffffffffffffffffffffffffffffffff', ids[0]]);
+  assert.equal(n, 2);
+  assert.deepEqual(v.listItems().map((i) => i.id).sort(), [ids[1], note.id].sort());
+  assert.equal(fs.existsSync(path.join(dir, 'blobs', ids[0] + '.bin')), false);
+  assert.equal(fs.existsSync(path.join(dir, 'blobs', ids[1] + '.bin')), true);
+  v.lock();
+  const v2 = new Vault(dir, { kdf: FAST_KDF });
+  await v2.unlockPassword(PW);
+  assert.equal(v2.listItems().length, 2);
+});
