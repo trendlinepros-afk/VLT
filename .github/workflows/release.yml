@@ -86,7 +86,20 @@ jobs:
             exit 1
           fi
       - run: npm ci
-      - name: Build installer and publish GitHub Release
-        run: npx electron-builder --win --x64 --publish always
+      - name: Build installer
+        run: npx electron-builder --win --x64 --publish never
+      # Publish in one step. (Letting electron-builder upload files in parallel
+      # can create duplicate releases for the same tag, which breaks downloads.)
+      - name: Publish GitHub Release
+        shell: bash
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAG: ${{ needs.bump.outputs.tag || github.ref_name }}
+        run: |
+          for f in dist/VLT-Setup.exe dist/VLT-Setup.exe.blockmap dist/latest.yml; do
+            test -f "$f" || { echo "::error::Missing build output $f"; exit 1; }
+          done
+          # Re-runs replace any earlier (possibly partial) release for this tag.
+          while gh release view "$TAG" >/dev/null 2>&1; do gh release delete "$TAG" --yes; done
+          gh release create "$TAG" dist/VLT-Setup.exe dist/VLT-Setup.exe.blockmap dist/latest.yml \
+            --title "VLT ${TAG#v}" --notes "Download **VLT-Setup.exe** below to install, or click *Check for updates* in VLT." --latest
