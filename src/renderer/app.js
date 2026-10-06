@@ -14,6 +14,8 @@ const state = {
   settings: null,
   update: null,
   mediaUrls: new Map(),
+  folder: null, // folder being viewed in "All items" (null = top level)
+  dragIds: null,
   selecting: false,
   selected: new Set(),
   lastClicked: null,
@@ -46,6 +48,11 @@ const ICONS = {
   refresh: '<polyline points="23 4 23 10 17 10"/><polyline points="1 20 1 14 7 14"/><path d="M3.51 9a9 9 0 0 1 14.85-3.36L23 10M1 14l4.64 4.36A9 9 0 0 0 20.49 15"/>',
   play: '<polygon points="6 3 20 12 6 21 6 3"/>',
   check: '<polyline points="20 6 9 17 4 12"/>',
+  back10: '<polyline points="1 4 1 10 7 10"/><path d="M3.51 15a9 9 0 1 0 2.13-9.36L1 10"/>',
+  fwd10: '<polyline points="23 4 23 10 17 10"/><path d="M20.49 15a9 9 0 1 1-2.12-9.36L23 10"/>',
+  folder: '<path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z"/>',
+  folderPlus: '<path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z"/><line x1="12" y1="11" x2="12" y2="17"/><line x1="9" y1="14" x2="15" y2="14"/>',
+  move: '<path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z"/><polyline points="12 10 15 13 12 16"/><line x1="8" y1="13" x2="15" y2="13"/>',
   checkSquare: '<polyline points="9 11 12 14 22 4"/><path d="M21 12v7a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h11"/>',
 };
 
@@ -451,12 +458,14 @@ async function enterVault() {
   state.mediaUrls.clear();
   state.filter = 'all';
   state.query = '';
+  state.folder = null;
   [state.items, state.settings] = await Promise.all([api.list(), api.getSettings()]);
   renderMain();
 }
 
 async function refreshItems() {
   state.items = await api.list();
+  if (state.folder && !folderById(state.folder)) state.folder = null;
   renderNav();
   renderGrid();
 }
@@ -487,6 +496,7 @@ function renderMain() {
         icon('checkSquare'),
         'Select',
       )),
+      h('button', { class: 'btn', onclick: newFolder }, icon('folderPlus'), 'New Folder'),
       h('button', { class: 'btn', onclick: newNote }, icon('plus'), 'New note'),
       h('button', { class: 'btn primary', onclick: pickFiles }, icon('upload'), 'Add files'),
       dom.updateBtn,
@@ -510,8 +520,12 @@ function renderMain() {
 }
 
 function renderNav() {
-  const counts = { all: state.items.length };
-  for (const it of state.items) counts[it.category] = (counts[it.category] || 0) + 1;
+  const counts = { all: 0 };
+  for (const it of state.items) {
+    if (it.kind === 'folder') continue;
+    counts.all++;
+    counts[it.category] = (counts[it.category] || 0) + 1;
+  }
   dom.nav.replaceChildren(
     ...CATEGORIES.map(([key, label, ic]) =>
       h(
@@ -519,6 +533,8 @@ function renderNav() {
         {
           class: `nav-item${state.filter === key ? ' active' : ''}`,
           onclick: () => {
+            // Clicking "All items" again goes back to the top-level folder.
+            if (key === 'all' && state.filter === 'all') state.folder = null;
             state.filter = key;
             renderNav();
             renderGrid();
@@ -532,12 +548,78 @@ function renderNav() {
   );
 }
 
+// "All items" without a search shows one folder at a time. Categories and search
+// look through the whole vault.
+function isFolderView() {
+  return state.filter === 'all' && !state.query;
+}
+
+// Where new files / notes / folders go: the open folder, or top level in other views.
+function targetFolder() {
+  return isFolderView() ? state.folder : null;
+}
+
+function folderById(id) {
+  return state.items.find((i) => i.id === id && i.kind === 'folder') || null;
+}
+
+// [top-most folder, ..., folder] for a folder id.
+function folderPath(id) {
+  const out = [];
+  const seen = new Set();
+  for (let f = folderById(id); f && !seen.has(f.id); f = folderById(f.parent)) {
+    seen.add(f.id);
+    out.unshift(f);
+  }
+  return out;
+}
+
+function childCount(folderId) {
+  return state.items.filter((i) => i.parent === folderId).length;
+}
+
+// Ids of the given folders and everything inside them.
+function withDescendants(ids) {
+  const out = new Set();
+  const queue = [...ids];
+  while (queue.length) {
+    const id = queue.pop();
+    if (out.has(id)) continue;
+    out.add(id);
+    for (const it of state.items) if (it.parent === id) queue.push(it.id);
+  }
+  return out;
+}
+
+const byFolderFirst = (a, b) =>
+  (a.kind === 'folder') === (b.kind === 'folder')
+    ? a.kind === 'folder'
+      ? a.name.localeCompare(b.name, undefined, { numeric: true, sensitivity: 'base' })
+      : b.modified - a.modified
+    : a.kind === 'folder'
+      ? -1
+      : 1;
+
 function visibleItems() {
-  return state.items.filter(
-    (it) =>
-      (state.filter === 'all' || it.category === state.filter) &&
-      (!state.query || (it.name || '').toLowerCase().includes(state.query) || (it.preview || '').toLowerCase().includes(state.query)),
-  );
+  if (isFolderView()) return state.items.filter((it) => it.parent === state.folder).sort(byFolderFirst);
+  return state.items
+    .filter(
+      (it) =>
+        (state.filter === 'all' ? true : it.category === state.filter) &&
+        (!state.query || (it.name || '').toLowerCase().includes(state.query) || (it.preview || '').toLowerCase().includes(state.query)),
+    )
+    .sort(byFolderFirst);
+}
+
+function openFolder(id) {
+  state.folder = id;
+  state.filter = 'all';
+  state.query = '';
+  if (dom.search) dom.search.value = '';
+  state.selected.clear();
+  state.selecting = false;
+  renderNav();
+  renderGrid();
 }
 
 async function mediaUrl(id) {
@@ -547,13 +629,36 @@ async function mediaUrl(id) {
 
 function renderGrid() {
   const items = visibleItems();
-  const label = CATEGORIES.find((c) => c[0] === state.filter)[1];
-  const header = h('div', { class: 'section-title' }, h('h1', { text: label }), h('span', { text: `${items.length} item${items.length === 1 ? '' : 's'}` }));
-  const drop = h('div', { class: 'dropzone', text: 'Drop files to encrypt them into your vault' });
+  const count = h('span', { class: 'count', text: `${items.length} item${items.length === 1 ? '' : 's'}` });
+  let header;
+  if (isFolderView()) {
+    header = h('div', { class: 'section-title' }, breadcrumbs(), count);
+    if (state.folder) {
+      header.append(
+        h('div', { class: 'grow' }),
+        h('button', { class: 'btn ghost', onclick: () => renameItem(folderById(state.folder)) }, icon('edit'), 'Rename folder'),
+      );
+    }
+  } else {
+    const label = state.query ? 'Search results' : CATEGORIES.find((c) => c[0] === state.filter)[1];
+    header = h('div', { class: 'section-title' }, h('h1', { text: label }), count);
+  }
+  const where = folderById(targetFolder());
+  const drop = h('div', { class: 'dropzone', text: `Drop files to encrypt them into ${where ? `"${where.name}"` : 'your vault'}` });
 
   if (!items.length) {
     const empty = state.items.length
-      ? h('div', { class: 'empty' }, icon('search'), h('h2', { text: 'Nothing here' }), h('div', { text: 'No items match this view.' }))
+      ? isFolderView() && state.folder
+        ? h(
+            'div',
+            { class: 'empty' },
+            icon('folder'),
+            h('h2', { text: 'This folder is empty' }),
+            h('div', { text: 'Add files or notes here, drag items onto the folder, or use Move.' }),
+            h('div', { style: 'height:16px' }),
+            h('button', { class: 'btn primary', onclick: pickFiles }, icon('upload'), 'Add files'),
+          )
+        : h('div', { class: 'empty' }, icon('search'), h('h2', { text: 'Nothing here' }), h('div', { text: 'No items match this view.' }))
       : h(
           'div',
           { class: 'empty' },
@@ -647,6 +752,10 @@ function renderSelection() {
           },
           'Select none',
         ),
+    n === 1
+      ? h('button', { class: 'btn', onclick: () => renameItem(state.items.find((i) => i.id === [...state.selected][0])) }, icon('edit'), 'Rename')
+      : null,
+    h('button', { class: 'btn', disabled: !n, onclick: () => moveDialog([...state.selected]) }, icon('move'), 'Move'),
     h('button', { class: 'btn', disabled: !n, onclick: bulkExport }, icon('download'), 'Export'),
     h('button', { class: 'btn danger', disabled: !n, onclick: bulkDelete }, icon('trash'), 'Delete'),
     h('button', { class: 'btn ghost', title: 'Done (Esc)', onclick: () => setSelecting(false) }, icon('x')),
@@ -656,10 +765,14 @@ function renderSelection() {
 async function bulkDelete() {
   const ids = [...state.selected];
   if (!ids.length) return;
+  const hasFolders = ids.some((id) => folderById(id));
+  const total = withDescendants(ids).size;
   const ok = await confirmDialog({
     title: `Delete ${ids.length} item${ids.length === 1 ? '' : 's'}?`,
-    body: 'They will be permanently removed from your vault. This cannot be undone.',
-    confirm: `Delete ${ids.length}`,
+    body: hasFolders
+      ? `Folders are deleted together with everything inside them (${total} item${total === 1 ? '' : 's'} in total). This cannot be undone.`
+      : 'They will be permanently removed from your vault. This cannot be undone.',
+    confirm: `Delete ${hasFolders ? total : ids.length}`,
     danger: true,
   });
   if (!ok) return;
@@ -707,7 +820,10 @@ api.on('bulk:progress', (p) => {
 
 function card(it, idx) {
   const thumb = h('div', { class: 'thumb' });
-  if (it.kind === 'note') {
+  if (it.kind === 'folder') {
+    thumb.classList.add('folder');
+    thumb.append(icon('folder'));
+  } else if (it.kind === 'note') {
     thumb.classList.add('note');
     thumb.textContent = it.preview || 'Empty note';
   } else if (it.category === 'photos' && !/heic|heif|tiff/.test(it.mime)) {
@@ -725,7 +841,15 @@ function card(it, idx) {
     thumb.append(icon(CATEGORY_ICON[it.category] || 'file'));
     if (ext(it.name)) thumb.append(h('span', { class: 'badge', text: ext(it.name) }));
   }
-  const meta = it.kind === 'note' ? `Note · ${formatDate(it.modified)}` : `${formatSize(it.size)} · ${formatDate(it.created)}`;
+  let meta;
+  if (it.kind === 'folder') {
+    const n = childCount(it.id);
+    meta = `Folder · ${n} item${n === 1 ? '' : 's'}`;
+  } else {
+    meta = it.kind === 'note' ? `Note · ${formatDate(it.modified)}` : `${formatSize(it.size)} · ${formatDate(it.created)}`;
+  }
+  // Outside the folder view, show where each item lives.
+  if (!isFolderView() && it.parent) meta = `${folderPath(it.parent).map((f) => f.name).join(' / ')} · ${meta}`;
   const box = h(
     'button',
     {
@@ -739,19 +863,218 @@ function card(it, idx) {
     icon('check'),
   );
   thumb.append(box);
-  return h(
+  const el = h(
     'div',
     {
-      class: 'card',
+      class: `card${it.kind === 'folder' ? ' folder-card' : ''}`,
       title: it.name,
+      draggable: 'true',
       onclick: (e) => {
         if (state.selecting || e.ctrlKey || e.shiftKey) toggleSelect(it, idx, e.shiftKey);
+        else if (it.kind === 'folder') openFolder(it.id);
         else openViewer(it);
+      },
+      ondragstart: (e) => {
+        // Dragging a selected card drags the whole selection.
+        const ids = state.selected.has(it.id) ? [...state.selected] : [it.id];
+        state.dragIds = ids;
+        e.dataTransfer.setData(DRAG_TYPE, JSON.stringify(ids));
+        e.dataTransfer.effectAllowed = 'move';
+        el.classList.add('dragging');
+      },
+      ondragend: () => {
+        state.dragIds = null;
+        el.classList.remove('dragging');
       },
     },
     thumb,
     h('div', { class: 'card-body' }, h('div', { class: 'card-name', text: it.name }), h('div', { class: 'card-meta', text: meta })),
   );
+  if (it.kind === 'folder') makeDropTarget(el, it.id);
+  return el;
+}
+
+// ------------------------------------------------------------------ folders
+
+const DRAG_TYPE = 'application/x-vlt-items';
+
+function breadcrumbs() {
+  const crumbs = [{ id: null, name: 'All items' }, ...folderPath(state.folder)];
+  const wrap = h('div', { class: 'crumbs' });
+  crumbs.forEach((c, i) => {
+    if (i) wrap.append(h('span', { class: 'crumb-sep' }, icon('right')));
+    const last = i === crumbs.length - 1;
+    const el = h(last ? 'h1' : 'button', { class: last ? 'crumb current' : 'crumb', text: c.name, onclick: last ? null : () => openFolder(c.id) });
+    // Drop on a breadcrumb to move items up to that folder.
+    if (!last) makeDropTarget(el, c.id);
+    wrap.append(el);
+  });
+  return wrap;
+}
+
+// Accepts vault items (move) and files from Windows (import) dropped on a folder.
+function makeDropTarget(el, folderId) {
+  const accepts = (e) => {
+    const types = [...e.dataTransfer.types];
+    if (types.includes('Files')) return true;
+    if (!types.includes(DRAG_TYPE)) return false;
+    // Can't drop a folder onto itself or into its own sub-folder.
+    return !(state.dragIds && folderId && state.dragIds.some((id) => withDescendants([id]).has(folderId)));
+  };
+  el.addEventListener('dragover', (e) => {
+    if (!accepts(e)) return;
+    e.preventDefault();
+    e.stopPropagation();
+    e.dataTransfer.dropEffect = [...e.dataTransfer.types].includes('Files') ? 'copy' : 'move';
+    el.classList.add('drop-target');
+  });
+  el.addEventListener('dragleave', () => el.classList.remove('drop-target'));
+  el.addEventListener('drop', async (e) => {
+    el.classList.remove('drop-target');
+    if (!accepts(e)) return;
+    e.preventDefault();
+    e.stopPropagation();
+    dom.content.classList.remove('dropping');
+    const target = folderById(folderId);
+    try {
+      if (e.dataTransfer.files.length) {
+        reportImport(await api.addFiles(e.dataTransfer.files, folderId));
+      } else {
+        const ids = JSON.parse(e.dataTransfer.getData(DRAG_TYPE) || '[]');
+        const n = await api.move(ids, folderId);
+        if (n) toast(`Moved ${n} item${n === 1 ? '' : 's'} to ${target ? `"${target.name}"` : 'the top level'}.`, 'ok');
+        setSelecting(false);
+      }
+      await refreshItems();
+    } catch (err) {
+      toast(err.message, 'error');
+    }
+  });
+}
+
+async function newFolder() {
+  const name = await promptDialog({ title: 'New folder', label: 'Folder name', value: 'New folder', confirm: 'Create' });
+  if (name === null || !name.trim()) return;
+  try {
+    const parent = targetFolder();
+    await api.createFolder(name.trim(), parent);
+    // Show the folder the new one was created in.
+    openFolder(parent);
+    await refreshItems();
+  } catch (err) {
+    toast(err.message, 'error');
+  }
+}
+
+async function renameItem(item) {
+  if (!item) return null;
+  const isFolder = item.kind === 'folder';
+  const name = await promptDialog({ title: isFolder ? 'Rename folder' : 'Rename', label: 'Name', value: item.name });
+  if (name === null || !name.trim() || name.trim() === item.name) return null;
+  try {
+    const updated = await api.rename(item.id, name.trim());
+    await refreshItems();
+    return updated;
+  } catch (err) {
+    toast(err.message, 'error');
+    return null;
+  }
+}
+
+// "Move to…" dialog with the folder tree. Resolves true if something moved.
+function moveDialog(ids) {
+  return new Promise((resolve) => {
+    let moved = false;
+    const blocked = withDescendants(ids.filter((id) => folderById(id)));
+    const items = ids.map((id) => state.items.find((i) => i.id === id)).filter(Boolean);
+    const current = items.length && items.every((i) => i.parent === items[0].parent) ? items[0].parent : undefined;
+    let choice = null;
+    const list = h('div', { class: 'folder-tree' });
+    const ok = h('button', { class: 'btn primary', text: 'Move here' });
+
+    const renderTree = () => {
+      const rows = [{ id: null, name: 'All items (top level)', depth: 0 }];
+      const walk = (parent, depth) => {
+        state.items
+          .filter((i) => i.kind === 'folder' && i.parent === parent)
+          .sort((a, b) => a.name.localeCompare(b.name, undefined, { numeric: true, sensitivity: 'base' }))
+          .forEach((f) => {
+            rows.push({ id: f.id, name: f.name, depth });
+            walk(f.id, depth + 1);
+          });
+      };
+      walk(null, 1);
+      list.replaceChildren(
+        ...rows.map((r) => {
+          const disabled = blocked.has(r.id);
+          const row = h(
+            'button',
+            {
+              class: `tree-row${choice === r.id ? ' chosen' : ''}`,
+              disabled,
+              title: disabled ? "A folder can't be moved into itself" : '',
+              onclick: () => {
+                choice = r.id;
+                renderTree();
+              },
+              ondblclick: () => !disabled && ok.click(),
+            },
+            r.id === null ? icon('grid') : icon('folder'),
+            h('span', { text: r.name }),
+            r.id === current ? h('span', { class: 'tree-note', text: 'current' }) : null,
+          );
+          row.style.paddingLeft = `${10 + r.depth * 20}px`;
+          return row;
+        }),
+      );
+      ok.disabled = choice === current || blocked.has(choice);
+    };
+
+    const newHere = h(
+      'button',
+      {
+        class: 'btn',
+        type: 'button',
+        onclick: async () => {
+          const name = await promptDialog({ title: 'New folder', label: `Create inside "${choice ? folderById(choice).name : 'All items'}"`, value: 'New folder', confirm: 'Create' });
+          if (name === null || !name.trim()) return;
+          try {
+            const f = await api.createFolder(name.trim(), choice);
+            state.items = await api.list();
+            choice = f.id;
+            renderTree();
+          } catch (err) {
+            toast(err.message, 'error');
+          }
+        },
+      },
+      icon('folderPlus'),
+      'New folder',
+    );
+    const cancel = h('button', { class: 'btn', text: 'Cancel' });
+    const label = items.length === 1 ? `"${items[0].name}"` : `${items.length} items`;
+    const m = modal([h('h2', { text: `Move ${label} to…` }), list, h('div', { class: 'dialog-actions' }, newHere, h('div', { class: 'grow' }), cancel, ok)], {
+      onClose: () => {
+        refreshItems();
+        resolve(moved);
+      },
+    });
+    cancel.onclick = () => m.close();
+    ok.onclick = async () => {
+      try {
+        const n = await api.move(ids, choice);
+        moved = n > 0;
+        const dest = folderById(choice);
+        toast(`Moved ${n} item${n === 1 ? '' : 's'} to ${dest ? `"${dest.name}"` : 'the top level'}.`, 'ok');
+        setSelecting(false);
+        m.close();
+      } catch (err) {
+        toast(err.message, 'error');
+      }
+    };
+    choice = current === undefined ? null : current;
+    renderTree();
+  });
 }
 
 // ------------------------------------------------------------------ adding things
@@ -784,7 +1107,7 @@ function reportImport(res) {
 
 async function pickFiles() {
   try {
-    const res = await api.pickFiles();
+    const res = await api.pickFiles(targetFolder());
     if (res.added.length || res.failed.length) {
       reportImport(res);
       await refreshItems();
@@ -796,12 +1119,15 @@ async function pickFiles() {
 
 function setupDrop(el) {
   let depth = 0;
+  const isFiles = (e) => [...e.dataTransfer.types].includes('Files');
   el.addEventListener('dragenter', (e) => {
+    if (!isFiles(e)) return; // moving items inside the vault, not importing
     e.preventDefault();
     depth++;
     el.classList.add('dropping');
   });
-  el.addEventListener('dragleave', () => {
+  el.addEventListener('dragleave', (e) => {
+    if (!isFiles(e)) return;
     depth = Math.max(0, depth - 1);
     if (!depth) el.classList.remove('dropping');
   });
@@ -812,7 +1138,7 @@ function setupDrop(el) {
     el.classList.remove('dropping');
     if (!e.dataTransfer.files.length) return;
     try {
-      reportImport(await api.addFiles(e.dataTransfer.files));
+      reportImport(await api.addFiles(e.dataTransfer.files, targetFolder()));
       await refreshItems();
     } catch (err) {
       toast(err.message, 'error');
@@ -826,7 +1152,7 @@ document.addEventListener('drop', (e) => e.preventDefault());
 
 async function newNote() {
   try {
-    const note = await api.createNote({ title: 'Untitled note', body: '' });
+    const note = await api.createNote({ title: 'Untitled note', body: '', parent: targetFolder() });
     await refreshItems();
     openViewer(note, { focusTitle: true });
   } catch (err) {
@@ -926,6 +1252,18 @@ function openViewer(item, opts = {}) {
       'button',
       {
         class: 'btn ghost',
+        title: 'Move to a folder',
+        onclick: async () => {
+          if (await moveDialog([item.id])) closeViewer();
+        },
+      },
+      icon('move'),
+      'Move',
+    ),
+    h(
+      'button',
+      {
+        class: 'btn ghost',
         onclick: async () => {
           const name = await promptDialog({ title: 'Rename', label: 'Name', value: item.name });
           if (name === null || !name.trim()) return;
@@ -989,8 +1327,18 @@ function openViewer(item, opts = {}) {
     if ($modals.childElementCount) return;
     if (e.key === 'Escape') closeViewer();
     const typing = /INPUT|TEXTAREA/.test(document.activeElement && document.activeElement.tagName);
-    if (!typing && e.key === 'ArrowLeft') go(-1);
-    if (!typing && e.key === 'ArrowRight') go(1);
+    if (typing) return;
+    const media = viewerEl && viewerEl.querySelector('.viewer-body video, .viewer-body audio');
+    if (media && !e.ctrlKey && !e.shiftKey) {
+      // While watching: ← / → (or J / L) skip 10 seconds, Space plays/pauses.
+      const k = e.key.toLowerCase();
+      if (k === 'arrowleft' || k === 'j') return e.preventDefault(), skip(media, -10);
+      if (k === 'arrowright' || k === 'l') return e.preventDefault(), skip(media, 10);
+      if (k === ' ' && document.activeElement !== media) return e.preventDefault(), media.paused ? media.play() : media.pause();
+    }
+    // Previous / next item: arrows for photos, Shift+arrows (or Page Up / Down) when a video is open.
+    if (e.key === 'PageUp' || e.key === 'ArrowLeft') return e.preventDefault(), go(-1);
+    if (e.key === 'PageDown' || e.key === 'ArrowRight') return e.preventDefault(), go(1);
   };
   document.addEventListener('keydown', onKey);
   viewerCleanup = () => document.removeEventListener('keydown', onKey);
@@ -1046,6 +1394,39 @@ async function renderNoteEditor(item, body, titleEl, saveState, opts) {
   };
 }
 
+function skip(media, seconds) {
+  const end = Number.isFinite(media.duration) ? media.duration : Infinity;
+  media.currentTime = Math.max(0, Math.min(end, media.currentTime + seconds));
+  flashSkip(media, seconds);
+}
+
+// Brief "-10s" / "+10s" bubble over the player.
+function flashSkip(media, seconds) {
+  const player = media.closest('.player');
+  if (!player) return;
+  const old = player.querySelector('.skip-flash');
+  if (old) old.remove();
+  const el = h('div', { class: `skip-flash ${seconds < 0 ? 'left' : 'right'}`, text: `${seconds < 0 ? '−' : '+'}${Math.abs(seconds)}s` });
+  player.append(el);
+  setTimeout(() => el.remove(), 600);
+}
+
+function skipControls(media) {
+  return h(
+    'div',
+    { class: 'skip-bar' },
+    h('button', { class: 'btn', title: 'Back 10 seconds (← or J)', onclick: () => skip(media, -10) }, icon('back10'), '10s'),
+    h(
+      'button',
+      { class: 'btn', title: 'Play / pause (Space)', onclick: () => (media.paused ? media.play() : media.pause()) },
+      icon('play'),
+      'Play / Pause',
+    ),
+    h('button', { class: 'btn', title: 'Forward 10 seconds (→ or L)', onclick: () => skip(media, 10) }, '10s', icon('fwd10')),
+    h('span', { class: 'skip-hint', text: '← → skip 10s · Shift+← → previous / next' }),
+  );
+}
+
 async function renderFilePreview(item, body) {
   const mime = item.mime || '';
   const noPreview = (why) =>
@@ -1069,12 +1450,12 @@ async function renderFilePreview(item, body) {
       const v = h('video', { controls: true, autoplay: true, controlslist: 'nodownload' });
       v.onerror = () => noPreview('This video format cannot be played here. Use "Open in app" to play it in another player.');
       v.src = await mediaUrl(item.id);
-      body.replaceChildren(v);
+      body.replaceChildren(h('div', { class: 'player' }, v, skipControls(v)));
     } else if (mime.startsWith('audio/')) {
       const a = h('audio', { controls: true, autoplay: true, controlslist: 'nodownload' });
       a.onerror = () => noPreview('This audio format cannot be played here.');
       a.src = await mediaUrl(item.id);
-      body.replaceChildren(a);
+      body.replaceChildren(h('div', { class: 'player' }, a, skipControls(a)));
     } else if (mime === 'application/pdf') {
       body.replaceChildren(h('iframe', { src: await mediaUrl(item.id), title: item.name }));
     } else if (mime === 'application/vnd.openxmlformats-officedocument.wordprocessingml.document') {
@@ -1391,6 +1772,10 @@ document.addEventListener('keydown', (e) => {
       selectAllVisible();
     }
     if (e.key === 'Escape' && state.selecting) setSelecting(false);
+    if ((e.key === 'Backspace' || (e.altKey && e.key === 'ArrowUp')) && isFolderView() && state.folder) {
+      e.preventDefault();
+      openFolder(folderById(state.folder).parent || null);
+    }
   }
   if (e.ctrlKey && e.key.toLowerCase() === 'n' && !viewerEl) {
     e.preventDefault();
@@ -1406,6 +1791,7 @@ api.on('vault:locked', async ({ reason }) => {
   state.confirmedPlaintext = false;
   state.selecting = false;
   state.selected.clear();
+  state.folder = null;
   dom = {};
   if (bulkToast) bulkToast.remove();
   bulkToast = null;

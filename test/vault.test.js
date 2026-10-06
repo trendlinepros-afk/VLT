@@ -249,3 +249,60 @@ test('deleteItems removes several items and their encrypted files at once', asyn
   await v2.unlockPassword(PW);
   assert.equal(v2.listItems().length, 2);
 });
+
+test('folders: create, nest, move, rename, block cycles, recursive delete', async () => {
+  const { v, dir, root } = await newVault();
+  const trips = await v.createFolder({ name: 'Trips' });
+  const y2024 = await v.createFolder({ name: '2024', parent: trips.id });
+  assert.equal(y2024.parent, trips.id);
+  await assert.rejects(v.createFolder({ name: 'x', parent: 'ffffffffffffffffffffffffffffffff' }), /no longer exists/);
+
+  const src = path.join(root, 'clip.mp4');
+  await fsp.writeFile(src, crypto.randomBytes(3000));
+  const vid = await v.addFile(src, { parent: y2024.id });
+  assert.equal(vid.parent, y2024.id);
+  const note = await v.createNote({ title: 'top' });
+  assert.equal(note.parent, null);
+
+  // move note into Trips, video to top level
+  assert.equal(await v.move([note.id], trips.id), 1);
+  assert.equal(await v.move([vid.id], null), 1);
+  const byId = Object.fromEntries(v.listItems().map((i) => [i.id, i]));
+  assert.equal(byId[note.id].parent, trips.id);
+  assert.equal(byId[vid.id].parent, null);
+  // moving doesn't touch encrypted contents
+  assert.equal((await v.readAll(vid.id)).length, 3000);
+
+  // a folder can't go into itself or its own subfolder
+  await assert.rejects(v.move([trips.id], y2024.id), /into itself/);
+  await assert.rejects(v.move([trips.id], trips.id), /into itself/);
+  await assert.rejects(v.move([note.id], 'ffffffffffffffffffffffffffffffff'), /no longer exists/);
+
+  await v.rename(y2024.id, '2024 Summer');
+  assert.equal(v.listItems().find((i) => i.id === y2024.id).name, '2024 Summer');
+
+  // put the video back inside the subfolder, then delete the top folder: everything inside goes
+  await v.move([vid.id], y2024.id);
+  const n = await v.deleteItems([trips.id]);
+  assert.equal(n, 4); // Trips, 2024 Summer, note, video
+  assert.equal(v.listItems().length, 0);
+  assert.equal(fs.existsSync(path.join(dir, 'blobs', vid.id + '.bin')), false);
+
+  // survives a lock/unlock
+  const f = await v.createFolder({ name: 'Keep' });
+  v.lock();
+  const v2 = new Vault(dir, { kdf: FAST_KDF });
+  await v2.unlockPassword(PW);
+  assert.deepEqual(v2.listItems().map((i) => [i.name, i.kind, i.parent]), [['Keep', 'folder', null]]);
+  assert.equal(v2.listItems()[0].id, f.id);
+});
+
+test('items whose folder is missing show at top level (older vaults have no parent field)', async () => {
+  const { v } = await newVault();
+  const note = await v.createNote({ title: 'legacy' });
+  v._index.items[note.id].parent = 'ffffffffffffffffffffffffffffffff';
+  delete v._index.items[note.id].parent;
+  assert.equal(v.listItems()[0].parent, null);
+  v._index.items[note.id].parent = 'ffffffffffffffffffffffffffffffff';
+  assert.equal(v.listItems()[0].parent, null);
+});

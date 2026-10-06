@@ -36,8 +36,10 @@ contextBridge.exposeInMainWorld('vlt', {
   removeMany: (ids) => call('items:deleteMany', ids),
   exportMany: (ids) => call('items:exportMany', ids),
 
-  pickFiles: () => call('files:pick'),
-  addFiles: (files) => call('files:addPaths', Array.from(files, (f) => webUtils.getPathForFile(f)).filter(Boolean)),
+  createFolder: (name, parent) => call('folder:create', name, parent),
+  move: (ids, target) => call('items:move', ids, target),
+  pickFiles: (parent) => call('files:pick', parent),
+  addFiles: (files, parent) => call('files:addPaths', Array.from(files, (f) => webUtils.getPathForFile(f)).filter(Boolean), parent),
   mediaUrl: (id) => call('item:mediaUrl', id),
   text: (id) => call('item:text', id),
   docx: (id) => call('item:docx', id),

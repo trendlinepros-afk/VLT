@@ -403,8 +403,83 @@ class Vault {
 
   // ---------------------------------------------------------------- items
 
+  // ---- folders
+  //
+  // Folders are index entries ({ kind: 'folder', name, parent }). Every item has an
+  // optional `parent` folder id; missing/unknown parents mean "top level", so vaults
+  // created before folders existed need no migration. Moving only changes `parent`:
+  // encrypted file contents are never rewritten.
+
+  _parentOf(item, items = this._index.items) {
+    const p = item.parent;
+    return p && items[p] && items[p].kind === 'folder' ? p : null;
+  }
+
+  // Throws unless `parent` is null (top level) or an existing folder.
+  _checkParent(items, parent) {
+    if (parent === null || parent === undefined || parent === '') return null;
+    if (!items[parent] || items[parent].kind !== 'folder') throw new VaultError('NO_FOLDER', 'That folder no longer exists.');
+    return parent;
+  }
+
+  // True if `folderId` is `ancestorId` or somewhere inside it.
+  _isWithin(items, folderId, ancestorId) {
+    const seen = new Set();
+    for (let cur = folderId; cur && !seen.has(cur); cur = this._parentOf(items[cur] || {}, items)) {
+      if (cur === ancestorId) return true;
+      seen.add(cur);
+    }
+    return false;
+  }
+
+  // The given ids plus, for folders, everything inside them.
+  _withDescendants(items, ids) {
+    const out = new Set();
+    const queue = [...ids].filter((id) => items[id]);
+    while (queue.length) {
+      const id = queue.pop();
+      if (out.has(id)) continue;
+      out.add(id);
+      if (items[id].kind === 'folder') {
+        for (const it of Object.values(items)) if (this._parentOf(it, items) === id) queue.push(it.id);
+      }
+    }
+    return out;
+  }
+
+  async createFolder({ name, parent } = {}) {
+    const now = Date.now();
+    const folder = await this._mutateIndex((items) => {
+      const f = { id: newId(), kind: 'folder', name: cleanName(name, 'New folder'), parent: this._checkParent(items, parent), created: now, modified: now };
+      items[f.id] = f;
+      return f;
+    });
+    return this._publicItem(folder);
+  }
+
+  // Moves items (files, notes or folders) into `target` (a folder id, or null for top level).
+  async move(ids, target) {
+    return this._mutateIndex((items) => {
+      const dest = this._checkParent(items, target);
+      let moved = 0;
+      for (const id of new Set(ids)) {
+        const it = items[id];
+        if (!it) continue;
+        if (it.kind === 'folder' && dest && this._isWithin(items, dest, id)) {
+          throw new VaultError('BAD_MOVE', `Can't move the folder "${it.name}" into itself.`);
+        }
+        if (this._parentOf(it, items) === dest) continue;
+        it.parent = dest;
+        it.modified = Date.now();
+        moved++;
+      }
+      return moved;
+    });
+  }
+
   _publicItem(item) {
-    const base = { id: item.id, kind: item.kind, created: item.created, modified: item.modified };
+    const base = { id: item.id, kind: item.kind, parent: this._index ? this._parentOf(item) : null, created: item.created, modified: item.modified };
+    if (item.kind === 'folder') return { ...base, name: item.name, category: 'folders' };
     if (item.kind === 'note') {
       return { ...base, name: item.title, category: 'notes', preview: String(item.body || '').slice(0, 160) };
     }
@@ -425,10 +500,11 @@ class Vault {
     return item;
   }
 
-  async createNote({ title, body } = {}) {
+  async createNote({ title, body, parent } = {}) {
     const now = Date.now();
     const note = { id: newId(), kind: 'note', title: cleanName(title, 'Untitled note'), body: String(body ?? ''), created: now, modified: now };
     await this._mutateIndex((items) => {
+      note.parent = this._checkParent(items, parent);
       items[note.id] = note;
     });
     return this._publicItem(note);
@@ -463,24 +539,18 @@ class Vault {
   }
 
   async deleteItem(id) {
-    const item = await this._mutateIndex((items) => {
-      const it = items[id];
-      if (!it) throw new VaultError('NOT_FOUND', 'Item not found.');
-      delete items[id];
-      return it;
-    });
-    if (item.kind === 'file') await fsp.rm(this._blobPath(id), { force: true });
+    this.getItem(id);
+    await this.deleteItems([id]);
   }
 
-  // Deletes several items with a single index write. Unknown ids are skipped.
+  // Deletes several items with a single index write. Deleting a folder deletes
+  // everything inside it. Unknown ids are skipped. Returns the number removed.
   async deleteItems(ids) {
     const removed = await this._mutateIndex((items) => {
       const out = [];
-      for (const id of new Set(ids)) {
-        if (items[id]) {
-          out.push(items[id]);
-          delete items[id];
-        }
+      for (const id of this._withDescendants(items, ids)) {
+        out.push(items[id]);
+        delete items[id];
       }
       return out;
     });
@@ -500,7 +570,7 @@ class Vault {
   }
 
   // Encrypts a file from disk into the vault. Plaintext is never written anywhere.
-  async addFile(srcPath, { name, onProgress } = {}) {
+  async addFile(srcPath, { name, parent, onProgress } = {}) {
     this._requireUnlocked();
     const stat = await fsp.stat(srcPath);
     if (!stat.isFile()) throw new VaultError('NOT_FILE', 'Not a file: ' + srcPath);
@@ -552,6 +622,8 @@ class Vault {
     try {
       await this._mutateIndex(async (items) => {
         await renameWithRetry(tmp, blobPath);
+        // If the target folder was deleted during a long import, keep the file at top level.
+        item.parent = parent && items[parent] && items[parent].kind === 'folder' ? parent : null;
         items[id] = item;
       });
     } catch (err) {

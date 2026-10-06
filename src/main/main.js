@@ -240,7 +240,7 @@ function str(v, max = 10000) {
   return v;
 }
 
-async function importPaths(paths) {
+async function importPaths(paths, parent = null) {
   const added = [];
   const failed = [];
   for (let i = 0; i < paths.length; i++) {
@@ -252,6 +252,7 @@ async function importPaths(paths) {
       let lastSent = 0;
       added.push(
         await vault.addFile(p, {
+          parent,
           onProgress: (done, total) => {
             lastActivity = Date.now();
             if (Date.now() - lastSent > 150 || done === total) {
@@ -281,16 +282,21 @@ async function uniquePath(dir, name, used) {
   const ext = path.extname(name);
   const stem = name.slice(0, name.length - ext.length);
   for (let i = 1; ; i++) {
-    const candidate = i === 1 ? name : `${stem} (${i})${ext}`;
-    const full = path.join(dir, candidate);
-    if (used.has(candidate.toLowerCase())) continue;
+    const full = path.join(dir, i === 1 ? name : `${stem} (${i})${ext}`);
+    if (used.has(full.toLowerCase())) continue;
     try {
       await fsp.access(full);
     } catch {
-      used.add(candidate.toLowerCase());
+      used.add(full.toLowerCase());
       return full;
     }
   }
+}
+
+// Optional folder id from the UI: null/empty means top level.
+function optId(v) {
+  if (v === null || v === undefined || v === '') return null;
+  return str(v, 64);
 }
 
 function registerIpc() {
@@ -328,7 +334,14 @@ function registerIpc() {
   });
 
   handle('items:list', () => vault.listItems());
-  handle('note:create', (data) => vault.createNote({ title: str(data.title || '', 1000), body: str(data.body || '', 50e6) }));
+  handle('note:create', (data) =>
+    vault.createNote({ title: str(data.title || '', 1000), body: str(data.body || '', 50e6), parent: optId(data.parent) }),
+  );
+  handle('folder:create', (name, parent) => vault.createFolder({ name: str(name, 1000), parent: optId(parent) }));
+  handle('items:move', (ids, target) => {
+    if (!Array.isArray(ids) || ids.length > 100000) throw new Error('Invalid input');
+    return vault.move(ids.map((id) => str(id, 64)), optId(target));
+  });
   handle('note:get', (id) => vault.getNote(str(id, 64)));
   handle('note:update', (id, data) =>
     vault.updateNote(str(id, 64), {
@@ -339,14 +352,14 @@ function registerIpc() {
   handle('item:rename', (id, name) => vault.rename(str(id, 64), str(name, 1000)));
   handle('item:delete', (id) => vault.deleteItem(str(id, 64)));
 
-  handle('files:pick', async () => {
+  handle('files:pick', async (parent) => {
     const res = await dialog.showOpenDialog(win, { title: 'Add files to VLT', properties: ['openFile', 'multiSelections'] });
     if (res.canceled) return { added: [], failed: [] };
-    return importPaths(res.filePaths);
+    return importPaths(res.filePaths, optId(parent));
   });
-  handle('files:addPaths', (paths) => {
+  handle('files:addPaths', (paths, parent) => {
     if (!Array.isArray(paths)) throw new Error('Invalid input');
-    return importPaths(paths.map((p) => str(p, 4096)));
+    return importPaths(paths.map((p) => str(p, 4096)), optId(parent));
   });
 
   handle('item:mediaUrl', (id) => {
@@ -387,19 +400,41 @@ function registerIpc() {
     const used = new Set();
     let exported = 0;
     const failed = [];
-    for (let i = 0; i < ids.length; i++) {
-      let item;
+
+    // Folders are exported as real sub-folders with everything inside them.
+    const children = new Map();
+    for (const it of vault.listItems()) {
+      if (!children.has(it.parent)) children.set(it.parent, []);
+      children.get(it.parent).push(it.id);
+    }
+    const jobs = [];
+    const plan = async (id, destDir) => {
+      const item = vault.getItem(str(id, 64));
+      if (item.kind !== 'folder') return jobs.push({ item, destDir });
+      const sub = await uniquePath(destDir, safeFileName(item.name), used);
+      await fsp.mkdir(sub);
+      for (const child of children.get(item.id) || []) await plan(child, sub);
+    };
+    for (const id of ids) {
       try {
-        item = vault.getItem(str(ids[i], 64));
+        await plan(id, dir);
+      } catch (err) {
+        failed.push({ name: String(id), error: err.message });
+      }
+    }
+
+    for (let i = 0; i < jobs.length; i++) {
+      const { item, destDir } = jobs[i];
+      try {
         const base = item.kind === 'note' ? `${item.title}.txt` : item.name;
-        const file = await uniquePath(dir, safeFileName(base), used);
-        send('bulk:progress', { label: `Exporting ${path.basename(file)}`, index: i + 1, count: ids.length });
+        const file = await uniquePath(destDir, safeFileName(base), used);
+        send('bulk:progress', { label: `Exporting ${path.basename(file)}`, index: i + 1, count: jobs.length });
         lastActivity = Date.now();
         if (item.kind === 'note') await fsp.writeFile(file, vault.getNote(item.id).body, { flag: 'wx' });
         else await vault.exportFile(item.id, file);
         exported++;
       } catch (err) {
-        failed.push({ name: item ? item.name || item.title : ids[i], error: err.message });
+        failed.push({ name: item.name || item.title, error: err.message });
       }
     }
     send('bulk:progress', { finished: true });
