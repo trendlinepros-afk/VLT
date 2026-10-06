@@ -1,7 +1,7 @@
 {
   "name": "vlt",
   "productName": "VLT",
-  "version": "1.0.3",
+  "version": "1.0.4",
   "description": "VLT - an encrypted personal vault for Windows",
   "main": "src/main/main.js",
   "author": "trendlinepros-afk",
